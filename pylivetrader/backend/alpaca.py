@@ -23,6 +23,7 @@ import pandas as pd
 from trading_calendars import (
     get_calendar,
     register_calendar_alias,
+    TradingCalendar,
 )
 from trading_calendars.calendar_utils import (
     global_calendar_dispatcher as default_calendar,
@@ -49,7 +50,7 @@ from pylivetrader.finance.execution import (
 from pylivetrader.misc.pd_utils import normalize_date
 from pylivetrader.misc.parallel_utils import parallelize
 from pylivetrader.errors import SymbolNotFound
-from pylivetrader.assets import Equity
+from pylivetrader.assets import Equity, Asset
 
 from logbook import Logger
 
@@ -86,19 +87,21 @@ def skip_http_error(statuses):
                     log.warn(str(e))
                 else:
                     raise
+
         return wrapper
+
     return decorator
 
 
 class Backend(BaseBackend):
 
     def __init__(
-        self,
-        key_id=None,
-        secret=None,
-        base_url=None,
-        api_version='v2',
-        use_polygon=False
+            self,
+            key_id=None,
+            secret=None,
+            base_url=None,
+            api_version='v2',
+            use_polygon=False
     ):
         self._key_id = key_id
         self._secret = secret
@@ -107,7 +110,7 @@ class Backend(BaseBackend):
         self._api = tradeapi.REST(
             key_id, secret, base_url, api_version=api_version
         )
-        self._cal = get_calendar('NYSE')
+        self._cal: TradingCalendar = get_calendar('NYSE')
 
         self._open_orders = {}
         self._orders_pending_submission = {}
@@ -158,6 +161,7 @@ class Backend(BaseBackend):
                 self._open_orders[data.order['client_order_id']] = (
                     self._order2zp(Order(data.order))
                 )
+
         while 1:
             try:
                 conn.run(channels)
@@ -290,8 +294,8 @@ class Backend(BaseBackend):
         if quantopian_compatible:
             current_position = self.positions[asset]
             if (
-                abs(amount) > abs(current_position.amount) and
-                amount * current_position.amount < 0
+                    abs(amount) > abs(current_position.amount) and
+                    amount * current_position.amount < 0
             ):
                 # The order would take us from a long position to a short
                 # position or vice versa and needs to be broken up
@@ -375,7 +379,7 @@ class Backend(BaseBackend):
             initialize=False):
         # Check if the open order list is being asked for
         if (not initialize and status == 'open'
-           and before is None and days_back is None):
+                and before is None and days_back is None):
             return self._open_orders
 
         # Get all orders submitted days_back days before `before` or now.
@@ -436,7 +440,7 @@ class Backend(BaseBackend):
             dt,
             date_frequency,
             quantopian_compatible=True):
-        assert(field in (
+        assert (field in (
             'open', 'high', 'low', 'close', 'volume', 'price', 'last_traded'))
         assets_is_scalar = not isinstance(assets, (list, set, tuple))
         if assets_is_scalar:
@@ -444,14 +448,14 @@ class Backend(BaseBackend):
         else:
             symbols = [asset.symbol for asset in assets]
         if field == 'last_traded' or \
-           not quantopian_compatible and field == 'price':
+                not quantopian_compatible and field == 'price':
             results = self._get_spot_trade(symbols, field)
         else:
             results = self._get_spot_bars(symbols, field)
         return results[0] if assets_is_scalar else results
 
     def _get_spot_trade(self, symbols, field):
-        assert(field in ('price', 'last_traded'))
+        assert (field in ('price', 'last_traded'))
         symbol_trades = self._symbol_trades(symbols)
 
         def get_for_symbol(symbol_trades, symbol):
@@ -495,14 +499,47 @@ class Backend(BaseBackend):
             symbols = [assets.symbol]
         else:
             symbols = [asset.symbol for asset in assets]
-
-        symbol_bars = self._symbol_bars(
-            symbols, 'day' if is_daily else 'minute', limit=bar_count)
-
+        start = None
+        end = None
+        now = pd.to_datetime('now', utc=True).tz_convert('America/New_York').floor('min')
+        today_session_label = self._cal.minute_to_session_label(now)
+        today_minutes = self._cal.minutes_for_session(today_session_label)
+        all_minutes: pd.DatetimeIndex = self._cal.all_minutes
+        all_sessions: pd.DatetimeIndex = self._cal.all_sessions
+        need_intra_bars = False
         if is_daily:
+            if today_minutes[0] < now < today_minutes[-1]:
+                # when we ask daily bar at market hour, we aggregate today's minutes bar to get a recent daily bar
+                need_intra_bars = True
+                bar_count -= 1
+                end = self._cal.previous_session_label(today_session_label)
+            elif now >= today_minutes[-1]:  # after market close
+                end = today_session_label
+            else:  # before market open
+                end = self._cal.previous_session_label(today_session_label)
+            if bar_count >= 0:
+                e_idx = all_sessions.get_loc(end)
+                start = all_sessions[e_idx - bar_count + 1]
+                symbol_bars = self._symbol_bars(
+                    symbols, 'minute', _from=start, to=end)
+            else:
+                symbol_bars = {}
+
+        else:
+            if now >= today_minutes[-1]:
+                end = today_minutes[-1]
+            elif now <= today_minutes[0]:
+                end = self._cal.previous_minute(today_minutes[0])
+            e_idx = all_minutes.get_loc(end)
+            start = all_minutes[e_idx - bar_count + 1]
+
+            symbol_bars = self._symbol_bars(
+                symbols, 'minute', _from=start, to=end)
+
+        if need_intra_bars:
             intra_bars = {}
             symbol_bars_minute = self._symbol_bars(
-                symbols, 'minute', limit=1000)
+                symbols, 'minute', _from=today_minutes[0], to=now)
             for symbol, df in symbol_bars_minute.items():
                 agged = df.resample('1D').agg(dict(
                     open='first',
@@ -523,7 +560,7 @@ class Backend(BaseBackend):
                         'open', 'high', 'low', 'close', 'volume']
                 ))
                 continue
-            if is_daily:
+            if need_intra_bars:
                 agged = intra_bars.get(symbol)
                 if agged is not None and len(
                         agged.index) > 0 and agged.index[-1] not in df.index:
@@ -570,14 +607,18 @@ class Backend(BaseBackend):
                 query_limit *= 2
             if _from:
                 if size == 'day':
-                    to = _from + timedelta(days=query_limit+1)
+                    to = _from + timedelta(days=query_limit + 1)
                 else:
-                    to = _from + timedelta(minutes=query_limit+1)
+                    to = _from + timedelta(minutes=query_limit + 1)
             else:
                 if size == 'day':
-                    _from = to - timedelta(days=query_limit+1)
+                    _from = to - timedelta(days=query_limit + 1)
                 else:
-                    _from = to - timedelta(minutes=query_limit+1)
+                    _from = to - timedelta(minutes=query_limit + 1)
+
+        if _from and to:  # the API use left label
+            _from -= pd.Timedelta('1min')
+            to -= pd.Timedelta('1min')
 
         @skip_http_error((404, 504))
         def fetch(symbol):
@@ -590,9 +631,8 @@ class Backend(BaseBackend):
             else:
                 df = self._api.get_barset(symbol,
                                           size,
-                                          start=_from.date().isoformat(),
-                                          end=to.date().isoformat(),
-                                          limit=limit).df[symbol]
+                                          start=_from.isoformat(),
+                                          end=to.isoformat()).df[symbol]
 
             # zipline -> right label
             # API result -> left label (beginning of bucket)
