@@ -521,7 +521,7 @@ class Backend(BaseBackend):
                 e_idx = all_sessions.get_loc(end)
                 start = all_sessions[e_idx - bar_count + 1]
                 symbol_bars = self._symbol_bars(
-                    symbols, 'minute', _from=start, to=end)
+                    symbols, 'day', _from=start, to=end)
             else:
                 symbol_bars = {}
 
@@ -534,7 +534,7 @@ class Backend(BaseBackend):
             start = all_minutes[e_idx - bar_count + 1]
 
             symbol_bars = self._symbol_bars(
-                symbols, 'day', _from=start, to=end)
+                symbols, 'minute', _from=start, to=end)
 
         if need_intra_bars:
             intra_bars = {}
