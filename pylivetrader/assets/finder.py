@@ -42,10 +42,15 @@ class AssetFinder:
 
     @property
     def symbol_ownership_map(self):
-        return {
+        if hasattr(self, 'symbol_ownership_map_cache'):
+            return self.symbol_ownership_map_cache
+
+        self.symbol_ownership_map_cache = {
             split_delimited_symbol(v.symbol): v
             for k, v in self._asset_cache.items()
         }
+        return self.symbol_ownership_map_cache
+
 
     @property
     def fuzzy_symbol_ownership_map(self):
