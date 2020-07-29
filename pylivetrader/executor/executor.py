@@ -30,7 +30,7 @@ log = Logger('Executor')
 
 class AlgorithmExecutor:
 
-    def __init__(self, algo, data_portal):
+    def __init__(self, algo, data_portal, clock):
 
         self.data_portal = data_portal
         self.algo = algo
@@ -45,12 +45,15 @@ class AlgorithmExecutor:
         before_trading_start_minute = \
             (datetime.time(8, 45), 'America/New_York')
 
-        self.clock = RealtimeClock(
-            self.algo.trading_calendar,
-            before_trading_start_minute,
-            minute_emission=algo.data_frequency == 'minute',
-            time_skew=self.algo._backend.time_skew,
-        )
+        if not clock:
+            self.clock = RealtimeClock(
+                self.algo.trading_calendar,
+                before_trading_start_minute,
+                minute_emission=algo.data_frequency == 'minute',
+                time_skew=self.algo._backend.time_skew,
+            )
+        else:
+            self.clock = clock
 
     def run(self, retry=True):
 

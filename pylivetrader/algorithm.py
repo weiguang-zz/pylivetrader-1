@@ -217,6 +217,8 @@ class Algorithm(object):
             getattr(Algorithm, func)
         )]
 
+        self.clock = kwargs.pop('clock', None)
+
     def initialize(self, *args, **kwargs):
         self._context_persistence_excludes = (
             list(self.__dict__.keys()) + ['executor'])
@@ -270,6 +272,7 @@ class Algorithm(object):
         self.executor = AlgorithmExecutor(
             self,
             self.data_portal,
+            self.clock,
         )
 
         return self.executor.run(retry=retry)
