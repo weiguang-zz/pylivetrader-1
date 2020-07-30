@@ -640,8 +640,12 @@ class Backend(BaseBackend):
                 df = df.iloc[-limit:]
             return df
 
+        results = []
         if self._use_polygon:
-            return parallelize(fetch)(symbols)
+            result = parallelize(fetch)(symbols)
+            for symbol, df in result.items:
+                df.columns = pd.MultiIndex.from_product([[symbol], [df.columns]])
+                results.append(df)
         else:
             # alpaca support get data of multiple assets(<200) at once
             splitlen = 199
@@ -649,7 +653,21 @@ class Backend(BaseBackend):
             for i in range(0, len(symbols), splitlen):
                 part = symbols[i:i + splitlen]
                 parts.append(part)
-            return parallelize(fetch)(parts)
+            result = parallelize(fetch)(parts)
+            for v in result.values():
+                results.append(v)
+
+        # 校验index是否一致
+        if not np.all([np.all(results[0].index == results[i].index) for i in range(1, len(results))]):
+            raise Exception('index mismatch')
+        columns = results[0].columns
+        values = results[0].values
+        idxs = results[0].index
+        for i in range(1, len(results)):
+            columns = columns.append(results[i].columns)
+            values = np.append(values, results[i].values, axis=1)
+        result = pd.DataFrame(index=idxs, data=values, columns=columns)
+        return result
 
     def _symbol_trades(self, symbols):
         '''

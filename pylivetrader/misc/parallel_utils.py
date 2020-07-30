@@ -1,7 +1,5 @@
 import concurrent.futures
 import os
-import pandas as pd
-import numpy as np
 
 
 def _get_default_workers():
@@ -25,7 +23,7 @@ def parallelize(mapfunc, workers=None):
     workers = workers if workers else _get_default_workers()
 
     def wrapper(args_list):
-        results = []
+        result = {}
         with concurrent.futures.ThreadPoolExecutor(
                 max_workers=workers) as executor:
             tasks = {}
@@ -39,20 +37,7 @@ def parallelize(mapfunc, workers=None):
             for task in concurrent.futures.as_completed(tasks):
                 args = tasks[task]
                 task_result = task.result()
-                if not isinstance(task_result.columns, pd.MultiIndex):
-                    task_result.columns = pd.MultiIndex.from_product([[args], [task_result.columns]])
-                results.append(task_result)
-
-        # 校验index是否一致
-        if not np.all([np.all(results[0].index == results[i].index) for i in range(1, len(results))]):
-            raise Exception('index mismatch')
-        columns = results[0].columns
-        values = results[0].values
-        idxs = results[0].index
-        for i in range(1, len(results)):
-            columns = columns.append(results[i].columns)
-            values = np.append(values, results[i].values, axis=1)
-        result = pd.DataFrame(index=idxs, data=values, columns=columns)
+                result[str(args)] = task_result
         return result
 
     return wrapper
