@@ -517,19 +517,25 @@ class Backend(BaseBackend):
                 end = today_session_label
             else:  # before market open
                 end = self._cal.previous_session_label(today_session_label)
-            if bar_count >= 0:
+            if bar_count > 0:
                 e_idx = all_sessions.get_loc(end)
                 start = all_sessions[e_idx - bar_count + 1]
+                # no matter daily bar or minute bar, the _from and to must be minute level
+                # we set to the open time
+                start = self._cal.minutes_for_session(start)[0]
+                end = self._cal.minutes_for_session(end)[0]
                 symbol_bars = self._symbol_bars(
                     symbols, 'day', _from=start, to=end)
             else:
-                symbol_bars = {}
+                symbol_bars = pd.DataFrame()
 
         else:
             if now >= today_minutes[-1]:
                 end = today_minutes[-1]
             elif now <= today_minutes[0]:
                 end = self._cal.previous_minute(today_minutes[0])
+            else:
+                end = now
             e_idx = all_minutes.get_loc(end)
             start = all_minutes[e_idx - bar_count + 1]
 
@@ -537,43 +543,26 @@ class Backend(BaseBackend):
                 symbols, 'minute', _from=start, to=end)
 
         if need_intra_bars:
-            intra_bars = {}
-            symbol_bars_minute = self._symbol_bars(
+            symbol_bars_minute: pd.DataFrame = self._symbol_bars(
                 symbols, 'minute', _from=today_minutes[0], to=now)
-            for symbol, df in symbol_bars_minute.items():
-                agged = df.resample('1D').agg(dict(
-                    open='first',
-                    high='max',
-                    low='min',
-                    close='last',
-                    volume='sum',
-                )).dropna()
-                intra_bars[symbol] = agged
 
-        dfs = []
-        for asset in assets if not assets_is_scalar else [assets]:
-            symbol = asset.symbol
-            df = symbol_bars.get(symbol)
-            if df is None:
-                dfs.append(pd.DataFrame(
-                    [], columns=[
-                        'open', 'high', 'low', 'close', 'volume']
-                ))
-                continue
-            if need_intra_bars:
-                agged = intra_bars.get(symbol)
-                if agged is not None and len(
-                        agged.index) > 0 and agged.index[-1] not in df.index:
-                    if not (agged.index[-1] > df.index[-1]):
-                        log.warn(
-                            ('agged.index[-1] = {}, df.index[-1] = {} '
-                             'for {}').format(
-                                agged.index[-1], df.index[-1], symbol))
-                    df = df.append(agged.iloc[-1])
-            df.columns = pd.MultiIndex.from_product([[asset, ], df.columns])
-            dfs.append(df)
+            def agg(chunk):
+                chunk.columns = chunk.columns.droplevel(0)
+                open = chunk['open'][0]
+                high = chunk['high'].max()
+                low = chunk['low'].min()
+                close = chunk['close'][-1]
+                volume = chunk['volume'].sum()
 
-        return pd.concat(dfs, axis=1)
+                idx = [today_session_label]
+                columns = pd.Index(['open', 'high', 'low', 'close', 'volume'])
+                data = [[open, high, low, close, volume]]
+                return pd.DataFrame(data=data, index=idx, columns=columns)
+
+            intra_bars = symbol_bars_minute.groupby(level=0, axis=1).apply(lambda chunk: agg(chunk))
+            symbol_bars = pd.concat([symbol_bars, intra_bars])
+
+        return symbol_bars
 
     def _symbol_bars(
             self,
@@ -584,7 +573,7 @@ class Backend(BaseBackend):
             limit=None):
         """
         Query historic_agg_v2 either minute or day in parallel
-        for multiple symbols, and return in dict.
+        for multiple symbols, and return in DataFrame.
 
         symbols: list[str]
         size:    str ('day', 'minute')
@@ -592,9 +581,10 @@ class Backend(BaseBackend):
         to:      str or pd.Timestamp
         limit:   str or int
 
-        return: dict[str -> pd.DataFrame]
+        return: pd.Dataframe() with columns MultiIndex [asset -> OHLCV]
         """
         assert size in ('day', 'minute')
+        one_min = pd.Timedelta('1min')
 
         if not (_from or to):
             to = pd.to_datetime('now', utc=True).tz_convert('America/New_York')
@@ -616,9 +606,9 @@ class Backend(BaseBackend):
                 else:
                     _from = to - timedelta(minutes=query_limit + 1)
 
-        if _from and to:  # the API use left label
-            _from -= pd.Timedelta('1min')
-            to -= pd.Timedelta('1min')
+        if size == 'minute' and _from and to:  # the API use left label
+            _from -= one_min
+            to -= one_min
 
         @skip_http_error((404, 504))
         def fetch(symbol):
@@ -637,12 +627,12 @@ class Backend(BaseBackend):
             # zipline -> right label
             # API result -> left label (beginning of bucket)
             if size == 'minute':
-                df.index += pd.Timedelta('1min')
+                df.index += one_min
 
                 if not df.empty:
                     # mask out bars outside market hours
                     mask = self._cal.minutes_in_range(
-                        df.index[0], df.index[-1],
+                        _from+one_min, to+one_min
                     ).tz_convert(NY)
                     df = df.reindex(mask)
 
@@ -650,7 +640,16 @@ class Backend(BaseBackend):
                 df = df.iloc[-limit:]
             return df
 
-        return parallelize(fetch)(symbols)
+        if self._use_polygon:
+            return parallelize(fetch)(symbols)
+        else:
+            # alpaca support get data of multiple assets(<200) at once
+            splitlen = 199
+            parts = []
+            for i in range(0, len(symbols), splitlen):
+                part = symbols[i:i + splitlen]
+                parts.append(part)
+            return parallelize(fetch)(parts)
 
     def _symbol_trades(self, symbols):
         '''
