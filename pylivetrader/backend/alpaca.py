@@ -487,7 +487,7 @@ class Backend(BaseBackend):
         ]
         return results
 
-    def get_bars(self, assets, data_frequency, bar_count=500):
+    def get_bars(self, assets, data_frequency, bar_count=500, end_dt=None):
         '''
         Interface method.
 
@@ -499,68 +499,47 @@ class Backend(BaseBackend):
             symbols = [assets.symbol]
         else:
             symbols = [asset.symbol for asset in assets]
-        start = None
-        end = None
-        now = pd.to_datetime('now', utc=True).tz_convert('America/New_York').floor('min')
-        today_session_label = self._cal.minute_to_session_label(now)
-        today_minutes = self._cal.minutes_for_session(today_session_label)
+        # the timezone of end_dt if UTC, when data_frequency=daily, end_dt is midnight in UTC time
+        if not end_dt:
+            end_dt = pd.to_datetime('now', utc=True).floor('min')
+            session_label = self._cal.minute_to_session_label(end_dt)
+            session_open = self._cal.session_open(session_label)
+            session_close = self._cal.session_close(session_label)
+            if end_dt < session_open:  # before market open
+                end_dt = self._cal.previous_minute(end_dt)
+            elif session_open <= end_dt < session_close:
+                pass
+            else:
+                end_dt = session_close
+            if is_daily:
+                end_dt = session_label
+
         all_minutes: pd.DatetimeIndex = self._cal.all_minutes
         all_sessions: pd.DatetimeIndex = self._cal.all_sessions
-        need_intra_bars = False
         if is_daily:
-            if today_minutes[0] < now < today_minutes[-1]:
-                # when we ask daily bar at market hour, we aggregate today's minutes bar to get a recent daily bar
-                need_intra_bars = True
-                bar_count -= 1
-                end = self._cal.previous_session_label(today_session_label)
-            elif now >= today_minutes[-1]:  # after market close
-                end = today_session_label
-            else:  # before market open
-                end = self._cal.previous_session_label(today_session_label)
-            if bar_count > 0:
-                e_idx = all_sessions.get_loc(end)
-                start = all_sessions[e_idx - bar_count + 1]
-                # no matter daily bar or minute bar, the _from and to must be minute level
-                # we set to the open time
-                start = self._cal.minutes_for_session(start)[0]
-                end = self._cal.minutes_for_session(end)[0]
-                symbol_bars = self._symbol_bars(
-                    symbols, 'day', _from=start, to=end)
-            else:
-                symbol_bars = pd.DataFrame()
+            e_idx = all_sessions.get_loc(end_dt)
+            start_dt = all_sessions[e_idx - bar_count + 1]
+            # When we get the daily bar before closing， we get the data before yesterday
+            now = pd.to_datetime('now', utc=True).floor('min')
+            session_close = self._cal.session_close(end_dt)
+            if now < session_close:
+                end_dt = self._cal.previous_session_label(end_dt)
+                start_dt = self._cal.previous_session_label(start_dt)
+            # change to America/New_York time
+            start_dt = start_dt.tz_localize(None).tz_localize('America/New_York')
+            end_dt = end_dt.tz_localize(None).tz_localize('America/New_York')
+            symbol_bars = self._symbol_bars(
+                symbols, 'day', _from=start_dt, to=end_dt)
 
         else:
-            if now >= today_minutes[-1]:
-                end = today_minutes[-1]
-            elif now <= today_minutes[0]:
-                end = self._cal.previous_minute(today_minutes[0])
-            else:
-                end = now
-            e_idx = all_minutes.get_loc(end)
-            start = all_minutes[e_idx - bar_count + 1]
-
+            e_idx = all_minutes.get_loc(end_dt)
+            start_dt = all_minutes[e_idx - bar_count + 1]
             symbol_bars = self._symbol_bars(
-                symbols, 'minute', _from=start, to=end)
-
-        if need_intra_bars:
-            symbol_bars_minute: pd.DataFrame = self._symbol_bars(
-                symbols, 'minute', _from=today_minutes[0], to=now)
-
-            def agg(chunk):
-                chunk.columns = chunk.columns.droplevel(0)
-                open = chunk['open'][0]
-                high = chunk['high'].max()
-                low = chunk['low'].min()
-                close = chunk['close'][-1]
-                volume = chunk['volume'].sum()
-
-                idx = [today_session_label]
-                columns = pd.Index(['open', 'high', 'low', 'close', 'volume'])
-                data = [[open, high, low, close, volume]]
-                return pd.DataFrame(data=data, index=idx, columns=columns)
-
-            intra_bars = symbol_bars_minute.groupby(level=0, axis=1).apply(lambda chunk: agg(chunk))
-            symbol_bars = pd.concat([symbol_bars, intra_bars])
+                symbols, 'minute', _from=start_dt, to=end_dt)
+        # change the index values to assets
+        symbol_asset = {a.symbol: a for a in assets}
+        symbol_bars.columns = symbol_bars.columns.set_levels([symbol_asset[s] for s in symbol_bars.columns.levels[0]],
+                                                             level=0)
 
         return symbol_bars
 
@@ -581,7 +560,7 @@ class Backend(BaseBackend):
         to:      str or pd.Timestamp
         limit:   str or int
 
-        return: pd.Dataframe() with columns MultiIndex [asset -> OHLCV]
+        return: pd.Dataframe() with columns MultiIndex [symbol -> OHLCV]
         """
         assert size in ('day', 'minute')
         one_min = pd.Timedelta('1min')
@@ -657,16 +636,20 @@ class Backend(BaseBackend):
             for v in result.values():
                 results.append(v)
 
-        # 校验index是否一致
-        if not np.all([np.all(results[0].index == results[i].index) for i in range(1, len(results))]):
-            raise Exception('index mismatch')
-        columns = results[0].columns
-        values = results[0].values
-        idxs = results[0].index
-        for i in range(1, len(results)):
-            columns = columns.append(results[i].columns)
-            values = np.append(values, results[i].values, axis=1)
-        result = pd.DataFrame(index=idxs, data=values, columns=columns)
+        # cause the pd.concat has performance problem, we use the np.append to concat the values
+        # the results must has the same shape at axis 0
+        if len(results) > 0:
+            if not np.all([np.all(results[0].index == results[i].index) for i in range(1, len(results))]):
+                raise Exception('index mismatch')
+            columns = results[0].columns
+            values = results[0].values
+            idxs = results[0].index
+            for i in range(1, len(results)):
+                columns = columns.append(results[i].columns)
+                values = np.append(values, results[i].values, axis=1)
+            result = pd.DataFrame(index=idxs, data=values, columns=columns)
+        else:
+            result = pd.DataFrame()
         return result
 
     def _symbol_trades(self, symbols):
