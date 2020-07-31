@@ -37,7 +37,10 @@ def parallelize(mapfunc, workers=None):
             for task in concurrent.futures.as_completed(tasks):
                 args = tasks[task]
                 task_result = task.result()
-                result[str(args)] = task_result
+                if isinstance(args, list):
+                    result[str(args)] = task_result
+                else:
+                    result[args] = task_result
         return result
 
     return wrapper
