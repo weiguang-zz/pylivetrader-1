@@ -189,6 +189,14 @@ class Backend(BaseBackend):
                 raw_asset.id, raw_asset.exchange,
                 symbol=raw_asset.symbol,
                 asset_name=raw_asset.symbol,
+                **{
+                    'tradable': raw_asset.tradable,
+                    'marginable': raw_asset.marginable,
+                    'shortable': raw_asset.shortable,
+                    'easy_to_borrow': raw_asset.easy_to_borrow,
+                    'status': raw_asset.status,
+                    'class': raw_asset._raw['class'],
+                }
             )
 
             asset.start_date = t - one_day_offset

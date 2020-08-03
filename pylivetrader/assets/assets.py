@@ -32,6 +32,12 @@ class Asset:
         self.first_traded = None
         self.auto_close_date = None
         self.exchange_full = None
+        self.clazz = kwargs.get("class")
+        self.status = kwargs.get('status')
+        self.tradable = bool(kwargs.get('tradable')) if 'tradable' in kwargs else False
+        self.marginable = bool(kwargs.get('marginable')) if 'marginable' in kwargs else False
+        self.shortable = bool(kwargs.get('shortable')) if 'shortable' in kwargs else False
+        self.easy_to_borrow = bool(kwargs.get('easy_to_borrow')) if 'easy_to_borrow' in kwargs else False
 
     def __hash__(self):
         return hash(self.sid)
@@ -74,6 +80,12 @@ class Asset:
             'auto_close_date': self.auto_close_date,
             'exchange': self.exchange,
             'exchange_full': self.exchange_full,
+            'class': self.clazz,
+            'status': self.status,
+            'tradable': self.tradable,
+            'marginable': self.marginable,
+            'shortable': self.shortable,
+            'easy_to_borrow': self.easy_to_borrow,
         }
 
     def from_dict(cls, dic):
